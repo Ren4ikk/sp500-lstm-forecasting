@@ -1,111 +1,78 @@
-# 📈 S&P 500 Stock Price Forecasting with LSTM
+# S&P 500 Stock Price Forecasting (LSTM, PyTorch)
 
-A PyTorch implementation of a 2-layer LSTM network for short-term time series forecasting, trained on 5 years of daily closing prices across all 505 S&P 500 constituents. The model predicts next-day closing price from a 30-day rolling window and is validated against live market data fetched via `yfinance`.
+Двухслойная LSTM для предсказания цены закрытия акции на следующий день. Обучена на дневных ценах закрытия всех 505 компаний индекса S&P 500 (2013–2018, ~619 тыс. строк). На вход подаются последние 30 дней цены закрытия, на выходе — прогноз на следующий день. Проверена на живых рыночных данных через `yfinance`.
 
-## Highlights
+## Зачем этот проект
 
-- **Multi-ticker training**: trained jointly on ~619K rows across 505 tickers rather than a single stock, so the model learns generalizable price-movement patterns instead of overfitting to one company's idiosyncrasies
-- **Live inference validation**: tested on real-time AAPL data (2025–2026) despite training only on 2013–2018 historical data — a ~8-year distribution shift — and still achieved <1% relative error
-- **Train/test split ablation study**: quantified how the train/test split ratio affects generalization error (80/20 vs 50/50), showing a 5x difference in test loss
-- **Standard time-series best practices**: per-ticker normalization, strictly sequential (non-shuffled) train/test split to prevent lookahead leakage, gradient clipping, and adaptive LR scheduling
+Большинство похожих проектов по прогнозированию акций обучаются на одном тикере и на этом останавливаются. Здесь модель обучена сразу на всех 505 тикерах S&P 500, чтобы она училась общим паттернам ценового движения, а не запоминала историю одной конкретной компании. Дальше модель проверяется на живых данных AAPL за 2025–2026 год, хотя обучалась только на данных 2013–2018 — разрыв в 8 лет — чтобы посмотреть, действительно ли выученные паттерны переносятся на новый период.
 
-## Problem Statement
+Также в проекте есть небольшое исследование влияния соотношения train/test на качество модели — этот момент часто опускают в похожих проектах, хотя он заметно влияет на итоговые метрики.
 
-Financial time series are notoriously hard to forecast: they combine trend, seasonality, and a high noise floor. Feedforward networks ignore sequence order entirely, and vanilla RNNs suffer from vanishing gradients on long sequences. This project implements an **LSTM (Hochreiter & Schmidhuber, 1997)**, whose gating mechanism lets the network learn what to retain and what to discard over long time horizons — a property well suited to capturing dependencies in noisy financial data.
+## Результаты
 
-## Dataset
+Модель обучена с разбиением 80/20, для сравнения проведён эксперимент с разбиением 50/50:
 
-[S&P 500 Stock Data](https://www.kaggle.com/datasets/camnugent/sandp500) (Kaggle)
+| TRAIN_RATIO | Train loss (эпоха 50) | Test loss (эпоха 50) |
+|---|---|---|
+| 0.8 | 0.000547 | 0.044037 |
+| 0.5 | 0.000801 | 0.222131 |
+
+Уменьшение обучающей выборки вдвое увеличивает test loss примерно в пять раз — соотношение train/test здесь далеко не второстепенный гиперпараметр.
+
+Инференс на живых данных AAPL (последняя известная цена 251.49, реальная следующая цена 252.84):
 
 | | |
 |---|---|
-| Period | Feb 2013 – Feb 2018 (5 years) |
-| Tickers | 505 companies |
-| Rows | ~619,000 |
-| Fields | `date`, `open`, `high`, `low`, `close`, `volume`, `Name` |
-| Target | `close` price only |
+| Предсказанная цена | 251.27 |
+| Абсолютная ошибка | 1.57 |
+| Относительная ошибка | ~0.62% |
 
-## Model Architecture
+Модель верно предсказала смену тренда (небольшой рост после нескольких дней падения), несмотря на то что данные после 2018 года ей не встречались при обучении.
+
+## Архитектура
 
 ```
-Input (batch, 30, 1)
-    → LSTM layer 1 (hidden_size=128)
-    → LSTM layer 2 (hidden_size=128), dropout=0.2 between layers
-    → last timestep output (batch, 128)
-    → Linear(128 → 32) → ReLU
-    → Linear(32 → 1)
-    → predicted next-day close price
+Вход (batch, 30, 1)
+  -> LSTM(hidden_size=128), 2 слоя, dropout=0.2 между слоями
+  -> берётся выход последнего шага
+  -> Linear(128 -> 32) -> ReLU -> Linear(32 -> 1)
+  -> предсказанная цена закрытия следующего дня
 ```
 
-~274K trainable parameters. The model consumes a 30-day window of normalized closing prices (roughly one trading month) and outputs a single-step forecast.
+~274 тыс. параметров. Длина окна 30 выбрана исходя из того, что торговый месяц — это примерно 21–23 дня, то есть модель видит чуть больше месяца истории на каждом предсказании.
 
-## Data Pipeline
+## Работа с данными
 
-1. **Normalization** — each ticker is scaled independently with `MinMaxScaler` to `[0, 1]`, since raw price ranges vary by orders of magnitude across companies (e.g. AMZN vs. a low-priced stock). This lets the model learn *shape* of price movement rather than absolute price level.
-2. **Sliding window** — `SEQ_LEN = 30`: consecutive windows `[p_t, ..., p_t+29] → p_t+30` are generated per ticker.
-3. **Sequential split** — no random shuffling of the split itself (this would leak future information into training); the scaler is fit only on the training portion and applied (not refit) on the test portion.
-4. All tickers are combined via `ConcatDataset` and batched with `DataLoader(batch_size=64)`, with shuffling enabled only within the training set.
+- Каждый тикер масштабируется отдельно через `MinMaxScaler` — цены акций разных компаний отличаются на порядки, и общий scaler сместил бы модель в сторону дорогих бумаг.
+- Scaler подгоняется только на обучающей части и лишь применяется (без повторного fit) на тестовой — иначе статистика тестовой выборки просочится в обучение.
+- Разбиение на train/test последовательное, а не случайное — случайное разбиение временного ряда приводит к утечке данных из будущего.
+- Обучение: Adam (lr=1e-3), MSE loss, gradient clipping с max_norm=1.0, `ReduceLROnPlateau` (снижает lr вдвое, если за 5 эпох нет улучшения).
 
-## Training Configuration
+## Содержимое репозитория
 
-| Parameter | Value |
+| Файл | Описание |
 |---|---|
-| Epochs | 50 |
-| Batch size | 64 |
-| Optimizer | Adam (lr=1e-3) |
-| Loss | MSE |
-| Gradient clipping | max_norm=1.0 |
-| LR scheduler | ReduceLROnPlateau (factor=0.5, patience=5) |
+| `data.py` | Загрузка датасета, нормализация по тикерам, формирование скользящих окон |
+| `model.py` | Определение архитектуры LSTM |
+| `train.py` | Цикл обучения, планировщик, gradient clipping |
+| `inference.py` | Загружает обученную модель и делает предсказание на живых данных через `yfinance` |
+| `get_sample_prices.py` | Получение свежей истории цен для инференса |
+| `inference_plot.png` | График результата инференса |
 
-Gradient clipping was used to counter exploding gradients common in RNN training on long sequences. `ReduceLROnPlateau` halves the learning rate whenever test loss plateaus for 5 consecutive epochs, letting the model converge quickly early on and fine-tune later without manual LR scheduling.
+Веса модели (`lstm_stock.pt`) и обученный scaler (`scaler.pkl`) в репозитории не хранятся — см. Releases, либо обучите модель заново через `train.py`. Сам датасет (`all_stocks_5yr.csv`, [S&P 500 Stock Data на Kaggle](https://www.kaggle.com/datasets/camnugent/sandp500)) тоже не в репозитории — скачайте его с Kaggle и положите в корень проекта перед запуском `train.py`.
 
-## Experiment: Train/Test Split Ratio
+## Запуск
 
-To study how the amount of training data affects generalization, the model was trained under two `TRAIN_RATIO` settings:
+```bash
+pip install torch pandas numpy scikit-learn yfinance matplotlib
 
-| TRAIN_RATIO | Train size | Test size | Train loss (epoch 50) | Test loss (epoch 50) |
-|---|---|---|---|---|
-| 0.8 | 80% | 20% | 0.000547 | 0.044037 |
-| 0.5 | 50% | 50% | 0.000801 | 0.222131 |
-
-**Finding**: reducing the training set from 80% to 50% increased test loss ~5x. With less training data, the model sees fewer price-pattern examples and generalizes worse to the later (unseen) portion of the time series — and the train/test loss gap in both settings indicates the model still overfits somewhat despite dropout, a known challenge for LSTMs on noisy financial data.
-
-## Inference Results (Live Data)
-
-The 80/20 model was evaluated on live AAPL data pulled via `yfinance`, using the last 30 trading days as input:
-
-| Metric | Value |
-|---|---|
-| Last known price | 251.49 |
-| Predicted price | 251.27 |
-| Actual next price | 252.84 |
-| Absolute error | 1.57 |
-| Relative error | ~0.62% |
-
-Despite an ~8-year gap between the training data (2013–2018) and inference data (2025–2026), the model correctly predicted a trend reversal (small uptick after a downtrend), suggesting it learned generalizable price-movement patterns rather than memorizing a specific period.
-
-## Limitations
-
-- Univariate model: does not incorporate exogenous signals (news sentiment, macroeconomic indicators, trading volume) that materially affect real-world price behavior
-- Single-step forecasting only; no multi-horizon prediction
-- Train/test loss gap indicates residual overfitting despite dropout regularization
-
-## Tech Stack
-
-`Python` · `PyTorch` · `pandas` · `NumPy` · `scikit-learn` (MinMaxScaler) · `yfinance` · `matplotlib`
-
-## Project Structure
-
-```
-.
-├── data/                  # dataset loading & preprocessing
-├── model.py               # LSTM architecture definition
-├── train.py                # training loop, scheduler, gradient clipping
-├── inference.py           # live inference via yfinance
-├── notebooks/              # experiments (TRAIN_RATIO ablation, etc.)
-└── README.md
+# скачать all_stocks_5yr.csv с Kaggle в корень проекта
+python train.py        # обучает модель, сохраняет lstm_stock.pt и scaler.pkl
+python inference.py     # делает предсказание на актуальных данных
 ```
 
-## Acknowledgments
+## Ограничения
 
-This project was originally completed as a deep learning coursework assignment; the codebase and writeup have been adapted here as a standalone portfolio project.
+- Модель одномерная — на вход идёт только цена закрытия, без объёма торгов, новостного фона или макропоказателей.
+- Прогноз только на один шаг вперёд, без многодневного горизонта.
+- Разрыв между train и test loss всё же заметен несмотря на dropout — финансовые временные ряды достаточно зашумлены, чтобы полностью убрать переобучение одной архитектурой не получается.
